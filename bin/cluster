@@ -1,0 +1,107 @@
+#!/usr/bin/env node
+
+import process from "node:process";
+import cluster from "node:cluster";
+import path from "node:path";
+import os from "node:os";
+
+main();
+
+async function main() {
+  const clusterName = parseClusterNameArg();
+  const modulePath = parseModulePathArg();
+  const workerCount = parseWorkerCountArg();
+  const workerEntryPoint = await findWorkerEntryPoint(modulePath);
+  if (cluster.isPrimary) {
+    startCluster(clusterName, workerCount);
+  } else {
+    workerEntryPoint();
+  }
+}
+
+// #region Cluster
+
+async function findWorkerEntryPoint(modulePath) {
+  try {
+    const module = await import(modulePath);
+    return validateModuleEntryPoint(module);
+  } catch (e) {
+    console.error("cluster: [path to worker module] is invalid", modulePath);
+    process.exit(1);
+  }
+}
+
+function validateModuleEntryPoint(module) {
+  if (isFunction(module.default)) return module.default;
+  if (isFunction(module.start)) return module.start;
+  const funcKeys = Object.keys(module).filter((k) => isFunction(module[k]));
+  if (funcKeys.length === 1) {
+    const funcKey = funcKeys[0];
+    const entryPoint = module[funcKey];
+    if (isFunction(entryPoint)) return entryPoint;
+  }
+  console.error(
+    "cluster: [path to worker module] must reference a module with a default export function or an exported 'start' function or only one named export function"
+  );
+  process.exit(1);
+}
+
+function isFunction(ref) {
+  return typeof ref === "function";
+}
+
+function startCluster(name, workerCount) {
+  for (let i = 0; i < workerCount; i++) {
+    startWorker(name);
+  }
+  cluster.on("disconnect", function (worker) {
+    console.error(`${name}[${worker.process.pid}]: Cluster worker died`);
+    worker.kill();
+    startWorker(name);
+  });
+}
+
+function startWorker(name) {
+  cluster.fork();
+  console.info(`${name}[${process.pid}]: Cluster worker started`);
+}
+
+// #region CLI arguments
+
+function parseClusterNameArg() {
+  const clusterName = process.argv[2];
+  if (clusterName === undefined) {
+    console.error(`cluster: [clusterName] is required`);
+    process.exit(1);
+  }
+  return clusterName;
+}
+
+function parseModulePathArg() {
+  const modulePath = process.argv[3];
+  if (modulePath === undefined) {
+    console.error(`cluster: [path to worker module] is required`);
+    process.exit(1);
+  }
+  return path.resolve(process.cwd(), modulePath);
+}
+
+function parseWorkerCountArg() {
+  const workerCount = process.argv[4];
+  const cpus = os.availableParallelism();
+  if (workerCount === undefined) {
+    return cpus;
+  }
+  const n = Number(workerCount);
+  if (Number.isNaN(n)) {
+    console.error(`cluster: [worker count] must be a number`);
+    process.exit(1);
+  }
+  if (n > cpus) {
+    console.error(
+      `cluster: [workers count] must be <= ${cpus} (number of CPUs)`
+    );
+    process.exit(1);
+  }
+  return n;
+}
